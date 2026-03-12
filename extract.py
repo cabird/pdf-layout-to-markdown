@@ -191,6 +191,8 @@ def validate_layout(data):
                     errors.append(f"{prefix}: missing '{key}'")
             if "type" in r and r["type"] not in ("text", "image", "skip"):
                 errors.append(f"{prefix}: type must be 'text', 'image', or 'skip', got '{r['type']}'")
+            if "image_kind" in r and r["image_kind"] not in ("table", "figure"):
+                errors.append(f"{prefix}: image_kind must be 'table' or 'figure', got '{r['image_kind']}'")
             if "bbox" in r:
                 bbox = r["bbox"]
                 if not isinstance(bbox, list) or len(bbox) != 4:
@@ -318,8 +320,16 @@ Return JSON only, no commentary. Format:
   "reading_order": ["txt_1", "img_1", "txt_2"]
 }"""
 
+DETECTION_TABLE_ADDENDUM = """
 
-def detect_layout(client, png_bytes, blocks, page_num):
+Additional instruction: For each "image" region, add an "image_kind" field:
+- "table" — if the region contains a data table (rows and columns of text/numbers)
+- "figure" — if the region contains a chart, diagram, photo, or other visual content
+
+Example: {"id": "img_1", "type": "image", "image_kind": "table", "bbox": [...]}"""
+
+
+def detect_layout(client, png_bytes, blocks, page_num, tables=False):
     """LLM call 1: detect layout regions from page image + text blocks."""
     png_b64 = base64.b64encode(png_bytes).decode()
 
@@ -343,8 +353,12 @@ def detect_layout(client, png_bytes, blocks, page_num):
         },
     ]
 
+    system_prompt = DETECTION_SYSTEM_PROMPT
+    if tables:
+        system_prompt += DETECTION_TABLE_ADDENDUM
+
     messages = [
-        {"role": "system", "content": DETECTION_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
 
@@ -422,7 +436,10 @@ def draw_boxes(pdf_path, page_idx, layout):
     reading_order = layout.get("reading_order", [])
 
     for region in layout["regions"]:
-        color = REGION_COLORS.get(region["type"], (0.5, 0.5, 0.5))
+        if region.get("image_kind") == "table":
+            color = (0, 0.7, 0)  # Green for tables
+        else:
+            color = REGION_COLORS.get(region["type"], (0.5, 0.5, 0.5))
         pdf_rect = norm_to_pdf(region["bbox"], page_rect)
 
         order_pos = ""
@@ -474,6 +491,69 @@ def crop_image_region(page, norm_bbox):
     return pix.tobytes("png")
 
 
+def extract_table_as_markdown(pdf_path, page_num, norm_bbox):
+    """Try to extract a table from a bbox region using pdfplumber.
+
+    Returns (markdown_str, score_info) if successful, or (None, score_info) if
+    the extraction quality is too low.
+    """
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        page = pdf.pages[page_num - 1]
+        w, h = page.width, page.height
+        x0, y0, x1, y1 = norm_bbox
+        crop_box = (x0 * w, y0 * h, x1 * w, y1 * h)
+        cropped = page.crop(crop_box)
+
+        tables = cropped.find_tables()
+        if not tables:
+            return None, {"reason": "no table found by pdfplumber"}
+
+        # Use the largest table found in the region
+        table = max(tables, key=lambda t: len(t.extract()))
+        rows = table.extract()
+
+        if not rows or len(rows) < 2:
+            return None, {"reason": f"too few rows: {len(rows) if rows else 0}"}
+
+        # Score the extraction quality
+        n_cols = len(rows[0])
+        if n_cols < 2:
+            return None, {"reason": f"too few columns: {n_cols}"}
+
+        ragged = [i for i, row in enumerate(rows) if len(row) != n_cols]
+        if ragged:
+            return None, {"reason": f"ragged rows (inconsistent column count): rows {ragged}"}
+
+        total_cells = len(rows) * n_cols
+        empty_cells = sum(1 for row in rows for cell in row if not cell or not cell.strip())
+        empty_ratio = empty_cells / total_cells if total_cells > 0 else 1.0
+
+        if empty_ratio > 0.35:
+            return None, {"reason": f"too many empty cells: {empty_ratio:.0%}"}
+
+        score_info = {
+            "rows": len(rows),
+            "cols": n_cols,
+            "empty_ratio": round(empty_ratio, 2),
+            "accepted": True,
+        }
+
+        # Build markdown table
+        def clean_cell(cell):
+            if cell is None:
+                return ""
+            return cell.strip().replace("|", "\\|").replace("\n", " ")
+
+        header = rows[0]
+        md_lines = []
+        md_lines.append("| " + " | ".join(clean_cell(c) for c in header) + " |")
+        md_lines.append("| " + " | ".join("---" for _ in header) + " |")
+        for row in rows[1:]:
+            md_lines.append("| " + " | ".join(clean_cell(c) for c in row) + " |")
+
+        return "\n".join(md_lines), score_info
+
+
 # ---------------------------------------------------------------------------
 # LLM Call 2: Assembly
 # ---------------------------------------------------------------------------
@@ -498,6 +578,9 @@ Your task:
 from PDF extraction. Use the page image as ground truth to fix these — restore proper \
 word spacing, correct mangled words, and fix punctuation. The image shows what the text \
 actually says.
+- IMPORTANT: Some text regions may already contain a markdown table (lines starting \
+with |). Preserve these tables exactly as provided — do not reformat, reorder columns, \
+or change cell content. Just place them at the correct position in reading order.
 - IMPORTANT: Only include text that actually appears on the page. Do NOT invent or \
 add headings, labels, or section titles that are not present in the extracted text. \
 If the page continues a section from a previous page, just continue the text without \
@@ -675,7 +758,7 @@ def run_describe(client, output_dir, workers):
 # ---------------------------------------------------------------------------
 
 
-def process_page(client, pdf_path, page_num, output_dir, tracker=None):
+def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=False):
     """Run the full pipeline for a single page."""
     page_idx = page_num - 1
 
@@ -694,7 +777,7 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None):
 
     # Step 2: LLM call 1 -- detect layout
     status(f"Detecting layout ({len(blocks)} blocks)...", advance=True)
-    layout = detect_layout(client, png_bytes, blocks, page_num)
+    layout = detect_layout(client, png_bytes, blocks, page_num, tables=tables)
 
     # Sanitize bboxes from LLM output
     for region in layout["regions"]:
@@ -731,15 +814,28 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None):
                 cropped = pg.crop((x0 * w, y0 * h, x1 * w, y1 * h))
                 text_contents[rid] = cropped.extract_text() or ""
 
-    # Crop image regions (single fitz open)
+    # Crop image regions (single fitz open) and attempt table extraction
     image_contents = {}
-    image_regions = [(r["id"], r["bbox"]) for r in non_skip if r["type"] == "image"]
+    table_markdowns = {}  # rid -> markdown string (for successful table extractions)
+    image_regions = [(r["id"], r["bbox"], r.get("image_kind")) for r in non_skip if r["type"] == "image"]
     if image_regions:
         with fitz.open(str(pdf_path)) as doc:
             pg = doc[page_idx]
-            for rid, bbox in image_regions:
+            for rid, bbox, image_kind in image_regions:
                 status(f"Cropping {rid}...", advance=True)
                 image_contents[rid] = crop_image_region(pg, bbox)
+
+        # Attempt table extraction for table-classified regions
+        if tables:
+            for rid, bbox, image_kind in image_regions:
+                if image_kind == "table":
+                    status(f"Extracting table {rid}...")
+                    md_table, score = extract_table_as_markdown(pdf_path, page_num, bbox)
+                    # Save extraction debug info
+                    score_file = output_dir / f"page{page_num}_{rid}_table.json"
+                    score_file.write_text(json.dumps(score, indent=2), encoding="utf-8")
+                    if md_table:
+                        table_markdowns[rid] = md_table
 
     # Build regions_with_content in original order
     regions_with_content = []
@@ -753,9 +849,17 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None):
             cropped = image_contents[rid]
             filename = f"page{page_num}_{rid}.png"
             (output_dir / filename).write_bytes(cropped)
-            regions_with_content.append({
-                "id": rid, "type": "image", "content": cropped, "filename": filename,
-            })
+
+            if rid in table_markdowns:
+                # Table successfully extracted as markdown
+                regions_with_content.append({
+                    "id": rid, "type": "text",
+                    "content": table_markdowns[rid],
+                })
+            else:
+                regions_with_content.append({
+                    "id": rid, "type": "image", "content": cropped, "filename": filename,
+                })
 
     # LLM call 2 -- assemble markdown
     status("Assembling markdown (LLM call)...", advance=True)
@@ -781,6 +885,8 @@ def main():
                         help="Number of parallel workers (default: 5, 'full' = one per page)")
     parser.add_argument("--env-file", type=Path, default=None,
                         help="Path to .env file with OPENAI_API_KEY (default: ~/.env)")
+    parser.add_argument("--tables", action="store_true",
+                        help="Attempt to extract simple tables as markdown instead of images")
     parser.add_argument("--no-describe", action="store_true",
                         help="Skip image description generation")
     parser.add_argument("--describe-only", action="store_true",
@@ -841,7 +947,13 @@ def main():
         workers = min(int(args.parallel), max(len(page_nums), 1))
 
     log(f"{args.pdf} -> {args.output_dir}/")
-    log(f"Model: {MODEL}, Workers: {workers}, Pages: {len(page_nums)}")
+    extras = []
+    if args.tables:
+        extras.append("tables")
+    if not args.no_describe:
+        extras.append("describe")
+    opts = f", Options: {'+'.join(extras)}" if extras else ""
+    log(f"Model: {MODEL}, Workers: {workers}, Pages: {len(page_nums)}{opts}")
     log("")
 
     if not args.describe_only:
@@ -866,7 +978,7 @@ def main():
         with Live(Group(cost_line, progress, status_line), console=console, refresh_per_second=10):
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(process_page, client, args.pdf, pn, args.output_dir, tracker): pn
+                    pool.submit(process_page, client, args.pdf, pn, args.output_dir, tracker, tables=args.tables): pn
                     for pn in page_nums
                 }
                 errors = []
