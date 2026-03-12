@@ -554,6 +554,52 @@ def extract_table_as_markdown(pdf_path, page_num, norm_bbox):
         return "\n".join(md_lines), score_info
 
 
+TABLE_LLM_SYSTEM_PROMPT = """\
+You are a table extraction specialist. You receive a cropped image of a table \
+from an academic paper. Convert it to a markdown table.
+
+Rules:
+- Output ONLY the markdown table, no commentary.
+- Use | column | separators | and a --- header separator row.
+- Reproduce the table content exactly as shown — do not invent or omit values.
+- For cells you cannot read clearly, use "?" rather than guessing.
+- If the table has multi-level headers (spanning columns), flatten them by \
+repeating or concatenating parent headers into each column header.
+- If the table is too complex to represent in markdown (heavily merged cells, \
+embedded charts, color-coded heatmaps), respond with exactly: COMPLEX
+- Keep cell content concise. Replace newlines within cells with spaces."""
+
+
+def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num):
+    """LLM fallback: ask the model to convert a cropped table image to markdown.
+
+    Returns (markdown_str, info) or (None, info) if the table is too complex.
+    """
+    img_b64 = base64.b64encode(cropped_png_bytes).decode()
+
+    resp = llm_call(client, f"table p{page_num} {region_id}", model=MODEL, messages=[
+        {"role": "system", "content": TABLE_LLM_SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "text", "text": f"Convert this table to markdown ({region_id}, page {page_num}):"},
+            {"type": "image_url", "image_url": {
+                "url": f"data:image/png;base64,{img_b64}", "detail": "high",
+            }},
+        ]},
+    ])
+
+    raw = resp.choices[0].message.content.strip()
+
+    if raw == "COMPLEX" or not raw.startswith("|"):
+        return None, {"method": "llm", "reason": "model reported COMPLEX or non-table output"}
+
+    # Basic sanity check: must have at least a header + separator + one data row
+    lines = [l for l in raw.split("\n") if l.strip()]
+    if len(lines) < 3:
+        return None, {"method": "llm", "reason": f"too few lines: {len(lines)}"}
+
+    return raw, {"method": "llm", "accepted": True, "lines": len(lines)}
+
+
 # ---------------------------------------------------------------------------
 # LLM Call 2: Assembly
 # ---------------------------------------------------------------------------
@@ -829,8 +875,17 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
         if tables:
             for rid, bbox, image_kind in image_regions:
                 if image_kind == "table":
-                    status(f"Extracting table {rid}...")
+                    status(f"Extracting table {rid} (pdfplumber)...")
                     md_table, score = extract_table_as_markdown(pdf_path, page_num, bbox)
+
+                    # If pdfplumber failed, try LLM fallback
+                    if md_table is None:
+                        status(f"Extracting table {rid} (LLM fallback)...")
+                        md_table, llm_score = extract_table_via_llm(
+                            client, image_contents[rid], rid, page_num,
+                        )
+                        score["llm_fallback"] = llm_score
+
                     # Save extraction debug info
                     score_file = output_dir / f"page{page_num}_{rid}_table.json"
                     score_file.write_text(json.dumps(score, indent=2), encoding="utf-8")
