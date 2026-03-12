@@ -891,6 +891,10 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
                     score_file.write_text(json.dumps(score, indent=2), encoding="utf-8")
                     if md_table:
                         table_markdowns[rid] = md_table
+                        status(f"Table {rid}: extracted as markdown")
+                    else:
+                        reason = score.get("llm_fallback", {}).get("reason", score.get("reason", "unknown"))
+                        status(f"Table {rid}: too complex, kept as image ({reason})")
 
     # Build regions_with_content in original order
     regions_with_content = []
@@ -1078,6 +1082,30 @@ def main():
         else:
             log(f"{n_pages} pages extracted")
     log("")
+
+    # Table extraction summary
+    table_jsons = sorted(args.output_dir.glob("page*_*_table.json"))
+    if table_jsons:
+        converted = []
+        kept_as_image = []
+        for tj in table_jsons:
+            info = json.loads(tj.read_text(encoding="utf-8"))
+            name = tj.stem.replace("_table", "")  # e.g. "page3_img_1"
+            if info.get("accepted") or info.get("llm_fallback", {}).get("accepted"):
+                method = "pdfplumber" if info.get("accepted") else "LLM"
+                converted.append((name, method))
+            else:
+                reason = info.get("llm_fallback", {}).get("reason", info.get("reason", "unknown"))
+                kept_as_image.append((name, reason))
+        if converted:
+            log(f"Tables converted to markdown ({len(converted)}):")
+            for name, method in converted:
+                log(f"  {name:<28s} via {method}")
+        if kept_as_image:
+            log(f"Tables kept as images ({len(kept_as_image)}):")
+            for name, reason in kept_as_image:
+                log(f"  {name:<28s} {reason}")
+        log("")
 
     output_files = [
         ("combined.md", "Full markdown with image references"),
