@@ -577,7 +577,7 @@ embedded charts, color-coded heatmaps), set markdown to null.
 Return JSON only, no commentary."""
 
 
-def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num):
+def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num, raw_text=""):
     """LLM fallback: ask the model to convert a cropped table image to markdown.
 
     Returns (markdown_str, info) or (None, info) if the table is too complex.
@@ -585,10 +585,17 @@ def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num):
     """
     img_b64 = base64.b64encode(cropped_png_bytes).decode()
 
+    text_hint = f"Convert this table to markdown ({region_id}, page {page_num}):"
+    if raw_text.strip():
+        text_hint += (
+            f"\n\nExtracted text from this region (may have formatting issues, "
+            f"use as a hint for cell values):\n{raw_text.strip()}"
+        )
+
     resp = llm_call(client, f"table p{page_num} {region_id}", model=MODEL, messages=[
         {"role": "system", "content": TABLE_LLM_SYSTEM_PROMPT},
         {"role": "user", "content": [
-            {"type": "text", "text": f"Convert this table to markdown ({region_id}, page {page_num}):"},
+            {"type": "text", "text": text_hint},
             {"type": "image_url", "image_url": {
                 "url": f"data:image/png;base64,{img_b64}", "detail": "high",
             }},
@@ -930,6 +937,18 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
 
         # Attempt table extraction for table-classified regions
         if tables:
+            # Extract raw text for table regions (for LLM hints)
+            table_raw_text = {}
+            table_bboxes = [(rid, bbox) for rid, bbox, ik in image_regions if ik == "table"]
+            if table_bboxes:
+                with pdfplumber.open(str(pdf_path)) as pdf:
+                    pg = pdf.pages[page_num - 1]
+                    w, h = pg.width, pg.height
+                    for rid, bbox in table_bboxes:
+                        x0, y0, x1, y1 = bbox
+                        cropped = pg.crop((x0 * w, y0 * h, x1 * w, y1 * h))
+                        table_raw_text[rid] = cropped.extract_text() or ""
+
             for rid, bbox, image_kind in image_regions:
                 if image_kind == "table":
                     status(f"Extracting table {rid} (pdfplumber)...")
@@ -940,6 +959,7 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
                         status(f"Extracting table {rid} (LLM fallback)...")
                         md_table, llm_score = extract_table_via_llm(
                             client, image_contents[rid], rid, page_num,
+                            raw_text=table_raw_text.get(rid, ""),
                         )
                         score["llm_fallback"] = llm_score
 
