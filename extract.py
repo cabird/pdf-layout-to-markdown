@@ -556,24 +556,32 @@ def extract_table_as_markdown(pdf_path, page_num, norm_bbox):
 
 TABLE_LLM_SYSTEM_PROMPT = """\
 You are a table extraction specialist. You receive a cropped image of a table \
-from an academic paper. Convert it to a markdown table.
+from an academic paper.
 
-Rules:
-- Output ONLY the markdown table, no commentary.
-- Use | column | separators | and a --- header separator row.
+Return JSON with three fields:
+1. "title": a short title (max 20 words) summarizing what the table shows.
+2. "description": 1-3 sentences describing the table's content for a reader \
+who cannot see the image.
+3. "markdown": the table converted to markdown using | column | separators | \
+and a --- header separator row.
+
+Rules for the markdown field:
 - Reproduce the table content exactly as shown — do not invent or omit values.
 - For cells you cannot read clearly, use "?" rather than guessing.
 - If the table has multi-level headers (spanning columns), flatten them by \
 repeating or concatenating parent headers into each column header.
 - If the table is too complex to represent in markdown (heavily merged cells, \
-embedded charts, color-coded heatmaps), respond with exactly: COMPLEX
-- Keep cell content concise. Replace newlines within cells with spaces."""
+embedded charts, color-coded heatmaps), set markdown to null.
+- Keep cell content concise. Replace newlines within cells with spaces.
+
+Return JSON only, no commentary."""
 
 
 def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num):
     """LLM fallback: ask the model to convert a cropped table image to markdown.
 
     Returns (markdown_str, info) or (None, info) if the table is too complex.
+    The info dict includes title and description for the image_descriptions output.
     """
     img_b64 = base64.b64encode(cropped_png_bytes).decode()
 
@@ -585,19 +593,37 @@ def extract_table_via_llm(client, cropped_png_bytes, region_id, page_num):
                 "url": f"data:image/png;base64,{img_b64}", "detail": "high",
             }},
         ]},
-    ])
+    ], response_format={"type": "json_object"})
 
     raw = resp.choices[0].message.content.strip()
 
-    if raw == "COMPLEX" or not raw.startswith("|"):
-        return None, {"method": "llm", "reason": "model reported COMPLEX or non-table output"}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, {"method": "llm", "reason": "invalid JSON response"}
+
+    title = data.get("title", "")
+    description = data.get("description", "")
+    md = data.get("markdown")
+
+    if not md or not isinstance(md, str) or not md.strip().startswith("|"):
+        return None, {
+            "method": "llm", "reason": "model reported COMPLEX or no markdown",
+            "title": title, "description": description,
+        }
 
     # Basic sanity check: must have at least a header + separator + one data row
-    lines = [l for l in raw.split("\n") if l.strip()]
+    lines = [l for l in md.strip().split("\n") if l.strip()]
     if len(lines) < 3:
-        return None, {"method": "llm", "reason": f"too few lines: {len(lines)}"}
+        return None, {
+            "method": "llm", "reason": f"too few lines: {len(lines)}",
+            "title": title, "description": description,
+        }
 
-    return raw, {"method": "llm", "accepted": True, "lines": len(lines)}
+    return md.strip(), {
+        "method": "llm", "accepted": True, "lines": len(lines),
+        "title": title, "description": description,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -744,11 +770,30 @@ def run_describe(client, output_dir, workers):
 
     skipped = [p for p in image_files if was_converted_to_markdown(p)]
     image_files = [p for p in image_files if not was_converted_to_markdown(p)]
+
+    # Pre-populate descriptions from table extraction LLM calls
+    descriptions = {}
+    for img_path in skipped:
+        table_json = img_path.with_name(img_path.stem + "_table.json")
+        if table_json.exists():
+            info = json.loads(table_json.read_text(encoding="utf-8"))
+            # LLM fallback stores title/description alongside markdown
+            llm_info = info.get("llm_fallback", {})
+            title = llm_info.get("title", "")
+            desc = llm_info.get("description", "")
+            if title or desc:
+                descriptions[img_path.name] = {"title": title, "description": desc}
+
     if skipped:
         log(f"Skipping {len(skipped)} table(s) already converted to markdown")
 
     if not image_files:
-        log("No extracted images found to describe.")
+        if descriptions:
+            desc_file = output_dir / "image_descriptions.json"
+            desc_file.write_text(json.dumps(descriptions, indent=2), encoding="utf-8")
+            log(f"Descriptions (from table extraction) -> {desc_file}")
+        else:
+            log("No extracted images found to describe.")
         return
 
     log(f"Describing {len(image_files)} images with paper context ({len(paper_text):,} chars)")
@@ -765,7 +810,6 @@ def run_describe(client, output_dir, workers):
     task = progress.add_task("Describing images", total=len(image_files), status="")
     cost_line = CostLine()
 
-    descriptions = {}
     with Live(Group(cost_line, progress, status_line), console=console, refresh_per_second=10):
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
