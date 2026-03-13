@@ -949,29 +949,49 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
                         cropped = pg.crop((x0 * w, y0 * h, x1 * w, y1 * h))
                         table_raw_text[rid] = cropped.extract_text() or ""
 
+            # Phase 1: try pdfplumber for all tables (fast, no LLM)
+            pdfplumber_results = {}  # rid -> (md_table, score)
+            need_llm = []  # rids that failed pdfplumber
             for rid, bbox, image_kind in image_regions:
                 if image_kind == "table":
                     status(f"Extracting table {rid} (pdfplumber)...")
                     md_table, score = extract_table_as_markdown(pdf_path, page_num, bbox)
-
-                    # If pdfplumber failed, try LLM fallback
+                    pdfplumber_results[rid] = (md_table, score)
                     if md_table is None:
-                        status(f"Extracting table {rid} (LLM fallback)...")
-                        md_table, llm_score = extract_table_via_llm(
-                            client, image_contents[rid], rid, page_num,
-                            raw_text=table_raw_text.get(rid, ""),
-                        )
-                        score["llm_fallback"] = llm_score
+                        need_llm.append(rid)
 
-                    # Save extraction debug info
-                    score_file = output_dir / f"page{page_num}_{rid}_table.json"
-                    score_file.write_text(json.dumps(score, indent=2), encoding="utf-8")
-                    if md_table:
-                        table_markdowns[rid] = md_table
-                        status(f"Table {rid}: extracted as markdown")
-                    else:
-                        reason = score.get("llm_fallback", {}).get("reason", score.get("reason", "unknown"))
-                        status(f"Table {rid}: too complex, kept as image ({reason})")
+            # Phase 2: LLM fallback for failures (in parallel)
+            if need_llm:
+                status(f"LLM fallback for {len(need_llm)} table(s)...")
+                with ThreadPoolExecutor(max_workers=len(need_llm)) as tpool:
+                    llm_futures = {
+                        tpool.submit(
+                            extract_table_via_llm, client, image_contents[rid],
+                            rid, page_num, table_raw_text.get(rid, ""),
+                        ): rid
+                        for rid in need_llm
+                    }
+                    for future in as_completed(llm_futures):
+                        rid = llm_futures[future]
+                        md_table, llm_score = future.result()
+                        _, score = pdfplumber_results[rid]
+                        score["llm_fallback"] = llm_score
+                        pdfplumber_results[rid] = (md_table, score)
+
+            # Record results
+            for rid, bbox, image_kind in image_regions:
+                if image_kind != "table":
+                    continue
+                md_table, score = pdfplumber_results[rid]
+                score_file = output_dir / f"page{page_num}_{rid}_table.json"
+                score_file.write_text(json.dumps(score, indent=2), encoding="utf-8")
+                if md_table:
+                    table_markdowns[rid] = md_table
+                    method = "LLM" if score.get("llm_fallback", {}).get("accepted") else "pdfplumber"
+                    status(f"Table {rid}: converted to markdown via {method}")
+                else:
+                    reason = score.get("llm_fallback", {}).get("reason", score.get("reason", "unknown"))
+                    status(f"Table {rid}: kept as image ({reason})")
 
     # Build regions_with_content in original order
     regions_with_content = []
