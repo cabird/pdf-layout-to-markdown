@@ -734,6 +734,19 @@ def run_describe(client, output_dir, workers):
     )
     image_files = [p for p in image_files if "img" in p.name or "table" in p.name]
 
+    # Skip images that were successfully converted to markdown tables
+    def was_converted_to_markdown(img_path):
+        table_json = img_path.with_name(img_path.stem + "_table.json")
+        if not table_json.exists():
+            return False
+        info = json.loads(table_json.read_text(encoding="utf-8"))
+        return info.get("accepted") or info.get("llm_fallback", {}).get("accepted")
+
+    skipped = [p for p in image_files if was_converted_to_markdown(p)]
+    image_files = [p for p in image_files if not was_converted_to_markdown(p)]
+    if skipped:
+        log(f"Skipping {len(skipped)} table(s) already converted to markdown")
+
     if not image_files:
         log("No extracted images found to describe.")
         return
