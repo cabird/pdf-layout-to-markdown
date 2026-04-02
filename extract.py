@@ -302,7 +302,8 @@ Your task:
 - Identify the logical regions on the page and classify each as:
   - "text" — body text, headings, captions (will be extracted as text)
   - "image" — figures, charts, diagrams, photos, complex tables (will be cropped as an image)
-  - "skip" — headers, footers, page numbers, margin artifacts (will be ignored)
+  - "skip" — headers, footers, page numbers, copyright notices, DOI lines, \
+journal/conference boilerplate, and margin artifacts (will be ignored)
 - Group adjacent blocks into the same region ONLY when they are part of the same \
 semantic section with no visual boundary between them. Start a NEW region when you see:
   - A background color change (e.g. a tinted/shaded callout box or sidebar)

@@ -129,7 +129,7 @@ The layout detection identifies three region types:
 |------|-------------|----------|
 | `text` | Body text, headings, captions, sidebars, references | Extracted as text via pdfplumber |
 | `image` | Figures, charts, diagrams, photos, complex tables | Cropped as PNG images |
-| `skip` | Headers, footers, page numbers, margin artifacts | Ignored |
+| `skip` | Headers, footers, page numbers, copyright notices, DOI lines, journal boilerplate | Ignored |
 
 The detection prompt guides the LLM to create **semantic regions, not geometric columns** — a single column containing a sidebar callout, body text, and a references section will be split into separate regions at visual boundaries (background color changes, borders, content-type shifts).
 
