@@ -71,12 +71,14 @@ def log_error(label, exc):
 
 def track_usage(resp, label):
     """Accumulate token usage from an OpenAI response."""
-    u = resp.usage
-    input_tok = u.prompt_tokens
-    output_tok = u.completion_tokens
-    thinking_tok = getattr(u, "completion_tokens_details", None)
-    thinking_tok = getattr(thinking_tok, "reasoning_tokens", 0) if thinking_tok else 0
-    text_tok = output_tok - thinking_tok
+    u = getattr(resp, "usage", None)
+    if not u:
+        return
+    input_tok = getattr(u, "prompt_tokens", 0) or 0
+    output_tok = getattr(u, "completion_tokens", 0) or 0
+    details = getattr(u, "completion_tokens_details", None)
+    thinking_tok = getattr(details, "reasoning_tokens", 0) if details else 0
+    text_tok = max(0, output_tok - thinking_tok)
 
     with _lock:
         usage_totals["input"] += input_tok
@@ -105,7 +107,7 @@ def slugify(name):
     """Convert a filename to a URL-friendly slug."""
     stem = Path(name).stem
     slug = re.sub(r'[^a-z0-9]+', '-', stem.lower()).strip('-')
-    return slug
+    return slug or "extracted_output"
 
 
 def find_output_dir(base):
@@ -141,7 +143,8 @@ class CostLine:
     """Mutable Rich renderable showing live accumulated cost."""
 
     def __rich__(self):
-        t = usage_totals
+        with _lock:
+            t = usage_totals.copy()
         cost = (
             t["input"] * COST_PER_M["input"] / 1_000_000
             + t["output"] * COST_PER_M["output"] / 1_000_000
@@ -517,8 +520,8 @@ def extract_table_as_markdown(pdf_path, page_num, norm_bbox):
             return None, {"reason": "no table found by pdfplumber"}
 
         # Use the largest table found in the region
-        table = max(tables, key=lambda t: len(t.extract()))
-        rows = table.extract()
+        extracted = [(t, t.extract()) for t in tables]
+        table, rows = max(extracted, key=lambda item: len(item[1]))
 
         if not rows or len(rows) < 2:
             return None, {"reason": f"too few rows: {len(rows) if rows else 0}"}
@@ -661,10 +664,10 @@ Your task:
 - For each image region, place an image reference at the correct position: \
 ![description](filename)
   Use a brief alt text based on what you can see in the annotated page image.
-- IMPORTANT: The extracted text may have missing spaces, garbled words, or OCR artifacts \
-from PDF extraction. Use the page image as ground truth to fix these — restore proper \
-word spacing, correct mangled words, and fix punctuation. The image shows what the text \
-actually says.
+- IMPORTANT: The extracted text comes directly from the PDF's text layer and is \
+authoritative. Do NOT change wording, terminology, or spelling. You may only fix \
+obvious formatting artifacts like missing spaces between words or broken hyphenation \
+from line breaks. When in doubt, preserve the extracted text exactly as provided.
 - IMPORTANT: Some text regions may already contain a markdown table (lines starting \
 with |). Preserve these tables exactly as provided — do not reformat, reorder columns, \
 or change cell content. Just place them at the correct position in reading order.
@@ -771,7 +774,6 @@ def run_describe(client, output_dir, workers):
     image_files = sorted(
         p for p in output_dir.glob("page*_*.png")
         if "_boxes" not in p.name and "_grid" not in p.name
-        and p.name != p.stem
     )
     image_files = [p for p in image_files if "img" in p.name or "table" in p.name]
 
@@ -981,7 +983,12 @@ def process_page(client, pdf_path, page_num, output_dir, tracker=None, tables=Fa
                     }
                     for future in as_completed(llm_futures):
                         rid = llm_futures[future]
-                        md_table, llm_score = future.result()
+                        try:
+                            md_table, llm_score = future.result()
+                        except Exception as e:
+                            log_error(f"table LLM fallback p{page_num} {rid}", e)
+                            md_table = None
+                            llm_score = {"method": "llm", "reason": f"exception: {type(e).__name__}: {e}"}
                         _, score = pdfplumber_results[rid]
                         score["llm_fallback"] = llm_score
                         pdfplumber_results[rid] = (md_table, score)
@@ -1108,7 +1115,14 @@ def main():
     if args.parallel.lower() == "full":
         workers = max(len(page_nums), 1)
     else:
-        workers = min(int(args.parallel), max(len(page_nums), 1))
+        try:
+            parallel = int(args.parallel)
+            if parallel < 1:
+                raise ValueError
+        except ValueError:
+            log("Error: --parallel must be a positive integer or 'full'")
+            sys.exit(1)
+        workers = min(parallel, max(len(page_nums), 1))
 
     log(f"{args.pdf} -> {args.output_dir}/")
     extras = []
