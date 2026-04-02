@@ -133,9 +133,21 @@ The layout detection identifies three region types:
 
 The detection prompt guides the LLM to create **semantic regions, not geometric columns** — a single column containing a sidebar callout, body text, and a references section will be split into separate regions at visual boundaries (background color changes, borders, content-type shifts).
 
+## Output Variants
+
+For multi-page PDFs, the pipeline produces three versions of the combined Markdown:
+
+| File | Description |
+|------|-------------|
+| `combined.md` | Standard Markdown with `![alt](image.png)` image references |
+| `combined_accessible.md` | Images kept inline with detailed descriptions added as blockquotes below each one |
+| `combined_text_only.md` | Image references replaced with text descriptions, no image links. Ideal for feeding to LLMs that don't support vision. |
+
+The accessible and text-only variants are generated automatically from the image descriptions post-pass (disable with `--no-describe`).
+
 ## Cost
 
-The pipeline makes 2 LLM calls per page (layout detection + markdown assembly), plus 1 call per extracted image (description) and optionally 1 per table (LLM fallback). Typical cost with `gpt-5-mini` is **$0.01–0.03 per page**.
+The pipeline uses `gpt-5-mini`, which keeps costs low. A typical 7-10 page academic paper costs **$0.10 to $0.25**. Disabling image descriptions with `--no-describe` makes it even cheaper.
 
 ## License
 
