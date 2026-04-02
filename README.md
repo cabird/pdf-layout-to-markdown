@@ -13,14 +13,16 @@ A vision-powered tool that converts PDF documents (especially academic papers) i
 
 ## How It Works
 
+Text and bounding boxes are extracted directly from the PDF. No OCR is involved. A vision model then looks at a rendered image of the page alongside this extracted information to understand the layout.
+
 The pipeline processes each page through four stages:
 
-1. **Render & Analyze** — Renders the page to a 300 DPI image and extracts raw text blocks with coordinates using PyMuPDF
-2. **Layout Detection** (LLM call) — A vision model sees the page image plus the text block positions and groups them into semantic regions (text, image, skip), outputting a layout JSON with bounding boxes and reading order
-3. **Content Extraction** — Text regions are extracted via pdfplumber; image regions are cropped as high-res PNGs
-4. **Markdown Assembly** (LLM call) — The vision model sees the annotated page and the extracted content, then produces final Markdown with proper headings, lists, blockquotes, and inline image references
+1. **Render & Analyze** — Renders the page to a 300 DPI PNG and extracts raw text blocks with their bounding box coordinates directly from the PDF using PyMuPDF. This is the ground truth text, pulled straight from the PDF's internal data.
+2. **Layout Detection** (LLM call) — A vision model receives the page image and the extracted text blocks with their positions. By *looking* at the page, it determines what each region is (body text, figure, table, sidebar), what should be skipped (headers, footers, page numbers), and what order everything should be read in. It outputs a layout JSON with semantic regions and reading order.
+3. **Content Extraction** — Text regions are extracted via pdfplumber using the detected bounding boxes; image regions are cropped as high-res PNGs from the original PDF.
+4. **Markdown Assembly** (LLM call) — The vision model sees an annotated version of the page (with labeled bounding boxes) alongside the extracted text, then formats it into clean Markdown with appropriate headings, lists, blockquotes, and inline image references.
 
-Optionally, a post-pass describes all extracted images and an additional stage attempts to convert detected tables into Markdown.
+Optionally, a post-pass describes all extracted images, and an additional stage attempts to convert detected tables into Markdown.
 
 ## Quick Start
 
