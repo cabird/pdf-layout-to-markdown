@@ -296,19 +296,27 @@ bounding box [x0, y0, x1, y1] where coordinates range from 0 to 1, and a \
 text snippet.
 
 Your task:
-- Group the blocks into logical regions on the page.
-- Classify each region as:
+- Identify the logical regions on the page and classify each as:
   - "text" — body text, headings, captions (will be extracted as text)
   - "image" — figures, charts, diagrams, photos, complex tables (will be cropped as an image)
   - "skip" — headers, footers, page numbers, margin artifacts (will be ignored)
+- Group adjacent blocks into the same region ONLY when they are part of the same \
+semantic section with no visual boundary between them. Start a NEW region when you see:
+  - A background color change (e.g. a tinted/shaded callout box or sidebar)
+  - A visible border, rule, or divider line
+  - A shift in content type (e.g. body text → reference list, → author bios, \
+→ acknowledgments, → a boxed sidebar or callout)
+  - A distinct typographic section even within the same column
+  The goal is semantic regions, not geometric columns. A single column often contains \
+multiple distinct regions.
 - Figure/table captions MUST be separate "text" regions, not merged into the "image" \
 region. The image region should tightly cover only the visual content. Place the caption \
 region immediately before or after the image in the reading order so the assembly step \
 can associate them.
 - Construct a bounding box for each region in normalized coordinates [x0, y0, x1, y1].
-  Combine adjacent blocks that belong together into a single region.
 - Add approximately 1% margin around each region. Slight overlaps between regions are OK.
-- Assign each region a descriptive ID like "txt_1", "img_1", "skip_hdr", "txt_caption_1".
+- Assign each region a descriptive ID like "txt_1", "img_1", "skip_hdr", "txt_caption_1", \
+"txt_sidebar_1", "txt_refs_1", "txt_bio_1".
 - Suggest a reading order listing the IDs of non-skip regions.
 
 Return JSON only, no commentary. Format:
