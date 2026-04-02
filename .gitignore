@@ -1,8 +1,16 @@
 __pycache__/
 *.pyc
 *.pdf
+.env
+.env.*
+!.env.example
 output/
 ai-where-it-matters*/
 dearstyne2026revealing*/
 pimenova2025vibe*/
 for_talk/
+cacm/
+icse-27-open-challenges*/
+miller2026maybewe/
+.playwright-mcp/
+pipeline_diagram.html
