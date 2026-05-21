@@ -42,7 +42,7 @@ This creates a directory (named after the PDF) containing Markdown, layout JSON,
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or manually install: `pymupdf`, `pdfplumber`, `openai`, `python-dotenv`, `rich`
-- An OpenAI API key (uses `gpt-5-mini` by default)
+- An OpenAI API key (uses `gpt-5-mini` by default), or an Azure OpenAI endpoint
 
 ## Usage
 
@@ -58,7 +58,8 @@ uv run extract.py <pdf> [options]
 | `--tables` | Attempt to extract tables as Markdown instead of images |
 | `--no-describe` | Skip the image description post-pass |
 | `--describe-only` | Only generate image descriptions from an existing output directory |
-| `--env-file PATH` | Path to .env file with `OPENAI_API_KEY` (default: `~/.env`) |
+| `--azure` | Use Azure OpenAI endpoint (see below) |
+| `--env-file PATH` | Path to .env file with API credentials (default: `~/.env`) |
 
 ### Examples
 
@@ -71,7 +72,20 @@ uv run extract.py paper.pdf -j 8 -o results/
 
 # Generate image descriptions for a previous extraction
 uv run extract.py paper.pdf --describe-only -o results/
+
+# Use Azure OpenAI instead of OpenAI
+uv run extract.py paper.pdf --azure --env-file ~/aoai.env
 ```
+
+### Azure OpenAI
+
+To use an Azure OpenAI endpoint instead of the standard OpenAI API, pass `--azure` and provide credentials via environment variables or a `.env` file:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AZURE_OPENAI_API_KEY` | Yes | Your Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | Yes | Endpoint URL (e.g., `https://my-resource.openai.azure.com/`) |
+| `AZURE_OPENAI_API_VERSION` | No | API version (default: `2025-04-01-preview`) |
 
 ## Output
 
