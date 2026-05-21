@@ -32,7 +32,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import pdfplumber
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import OpenAI, AzureOpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from rich.console import Console, Group
 from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, MofNCompleteColumn
@@ -1057,6 +1057,9 @@ def main():
                         help="Number of parallel workers (default: 5, 'full' = one per page)")
     parser.add_argument("--env-file", type=Path, default=None,
                         help="Path to .env file with OPENAI_API_KEY (default: ~/.env)")
+    parser.add_argument("--azure", action="store_true",
+                        help="Use Azure OpenAI endpoint (requires AZURE_OPENAI_API_KEY, "
+                             "AZURE_OPENAI_ENDPOINT, and optionally AZURE_OPENAI_API_VERSION in env)")
     parser.add_argument("--tables", action="store_true",
                         help="Attempt to extract simple tables as markdown instead of images")
     parser.add_argument("--no-describe", action="store_true",
@@ -1069,11 +1072,20 @@ def main():
         log(f"Error: {args.pdf} not found")
         sys.exit(1)
 
-    # Resolve API key: check env first, then .env file
-    if not os.environ.get("OPENAI_API_KEY"):
-        env_file = args.env_file or Path.home() / ".env"
-        if env_file.exists():
-            load_dotenv(env_file)
+    # Load .env file if provided (or default)
+    env_file = args.env_file or Path.home() / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+
+    if args.azure:
+        # Resolve Azure OpenAI credentials
+        azure_key = os.environ.get("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        if not azure_key or not azure_endpoint:
+            log("Error: --azure requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT.")
+            log("Set them in your environment or in your .env / --env-file.")
+            sys.exit(1)
+    else:
         if not os.environ.get("OPENAI_API_KEY"):
             log("Error: OPENAI_API_KEY not found.")
             log("Set it in your environment, in ~/.env, or pass --env-file path/to/.env")
@@ -1112,7 +1124,16 @@ def main():
 
     t_start = time.time()
 
-    client = OpenAI()
+    if args.azure:
+        api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+        client = AzureOpenAI(
+            api_key=azure_key,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version,
+        )
+        log(f"Using Azure OpenAI endpoint: {azure_endpoint}")
+    else:
+        client = OpenAI()
     if args.parallel.lower() == "full":
         workers = max(len(page_nums), 1)
     else:
